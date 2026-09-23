@@ -81,44 +81,32 @@ def generate_powercenter_xml(etl, database_type="Oracle", repository_name="ETL_R
     source = etl.get("source", {})
     target = etl.get("target", {})
     all_components = etl.get("components", [])
-    connections = etl.get("connections", [])
+    raw_connections = etl.get("connections", [])
 
-    # ============================================================
-    # FIX: AUTO-INJECT SOURCE QUALIFIER IF MISSING
-    # PowerCenter requires a Source Qualifier. If the AI skipped it, build it here.
-    # ============================================================
-    source_name = source.get("name", "SRC")
-    has_sq = any((c.get("type") or "").upper() == "SOURCE_QUALIFIER" for c in all_components)
-    
-    if not has_sq and source.get("fields"):
-        sq_id = f"auto_sq_{source_name}"
-        sq_comp = {
-            "id": sq_id,
-            "name": f"SQ_{source_name}",
-            "type": "SOURCE_QUALIFIER",
-            "description": "Auto-injected Source Qualifier",
-            "fields": [{"name": _field_name(f), "datatype": _field_datatype(f), "expression": ""} for f in source.get("fields", [])]
-        }
-        all_components.insert(0, sq_comp)
+    # 1. Normalize IDs and Names to prevent disconnects
+    source["id"] = source.get("id", source.get("name", "SRC"))
+    target["id"] = target.get("id", target.get("name", "TGT"))
+    for c in all_components:
+        c["id"] = c.get("id", c.get("name"))
         
-        # Rewire connections: anything coming from SOURCE now comes from the SQ
-        for conn in connections:
-            if conn.get("from") == source_name:
-                conn["from"] = sq_id
-                
-        # Connect SOURCE to the new SQ
-        connections.insert(0, {"from": source_name, "to": sq_id, "label": ""})
-    # ============================================================
+    all_nodes = [source] + all_components + [target]
+
+    def resolve_ref(ref):
+        for n in all_nodes:
+            if n.get("id") == ref or n.get("name") == ref:
+                return n["id"]
+        return ref
+
+    connections = []
+    for conn in raw_connections:
+        connections.append({"from": resolve_ref(conn.get("from")), "to": resolve_ref(conn.get("to"))})
 
     ordered_ids, component_map = compute_component_order(all_components, connections)
 
-    sid = next((c for c in ordered_ids if (component_map[c].get("type") or "").upper() == "SOURCE"), None)
-    tid = next((c for c in ordered_ids if (component_map[c].get("type") or "").upper() == "TARGET"), None)
-
-    s_inst = component_map[sid].get("name") if sid else source.get("name", "SRC")
-    t_inst = component_map[tid].get("name") if tid else target.get("name", "TGT")
-    s_fields = component_map[sid].get("fields") if sid and component_map[sid].get("fields") else source.get("fields", [])
-    t_fields = component_map[tid].get("fields") if tid and component_map[tid].get("fields") else target.get("fields", [])
+    source_instance = source.get("name", "SRC")
+    target_instance = target.get("name", "TGT")
+    s_fields = source.get("fields", [])
+    t_fields = target.get("fields", [])
 
     def def_fields_xml(tag, fields):
         rows = []
@@ -145,7 +133,7 @@ def generate_powercenter_xml(etl, database_type="Oracle", repository_name="ETL_R
 
     src_xml = (
         f'      <SOURCE BUSINESSNAME="" DATABASETYPE="{_esc(database_type)}" DBDNAME="default" '
-        f'DESCRIPTION="{_esc(src_desc)}" NAME="{_esc(s_inst)}" OBJECTVERSION="1" '
+        f'DESCRIPTION="{_esc(src_desc)}" NAME="{_esc(source_instance)}" OBJECTVERSION="1" '
         f'OWNERNAME="{_esc(src_owner)}" VERSIONNUMBER="1">\n'
         f'{def_fields_xml("SOURCEFIELD", s_fields)}\n'
         f'      </SOURCE>'
@@ -153,33 +141,37 @@ def generate_powercenter_xml(etl, database_type="Oracle", repository_name="ETL_R
 
     tgt_xml = (
         f'      <TARGET BUSINESSNAME="" CONSTRAINT="" DATABASETYPE="{_esc(database_type)}" '
-        f'DESCRIPTION="{_esc(tgt_desc)}" NAME="{_esc(t_inst)}" OBJECTVERSION="1" '
+        f'DESCRIPTION="{_esc(tgt_desc)}" NAME="{_esc(target_instance)}" OBJECTVERSION="1" '
         f'TABLEOPTIONS="" VERSIONNUMBER="1">\n'
         f'{def_fields_xml("TARGETFIELD", t_fields)}\n'
         f'      </TARGET>'
     )
 
-    outputs_by_id, inputs_by_id, inst_name_by_id, inst_type_by_id = {}, {}, {}, {}
+    outputs_by_id = {}
+    inputs_by_id = {}
+    inst_name_by_id = {}
+    inst_type_by_id = {}
 
-    outputs_by_id["__source__"] = {}
+    inst_name_by_id[source["id"]] = source_instance
+    inst_type_by_id[source["id"]] = "Source Definition"
+    outputs_by_id[source["id"]] = {}
     for f in s_fields:
         if name := _field_name(f):
-            outputs_by_id["__source__"][name] = {"datatype": _field_datatype(f), "precision": _precision_scale(f)[0], "scale": _precision_scale(f)[1]}
+            outputs_by_id[source["id"]][name] = {"datatype": _field_datatype(f), "precision": _precision_scale(f)[0], "scale": _precision_scale(f)[1]}
             
-    s_order = [n for f in s_fields if (n := _field_name(f))]
+    inst_name_by_id[target["id"]] = target_instance
+    inst_type_by_id[target["id"]] = "Target Definition"
+    inputs_by_id[target["id"]] = [n for f in t_fields if (n := _field_name(f))]
 
     tx_blocks = []
-    inst_blocks = [f'        <INSTANCE DESCRIPTION="" NAME="{_esc(s_inst)}" TRANSFORMATION_NAME="{_esc(s_inst)}" TRANSFORMATION_TYPE="Source Definition" TYPE="SOURCE"/>']
-    conn_blocks = []
-
+    
+    # CRITICAL FIX: DBDNAME="default" added to the Source INSTANCE
+    inst_blocks = [f'        <INSTANCE DBDNAME="default" DESCRIPTION="" NAME="{_esc(source_instance)}" TRANSFORMATION_NAME="{_esc(source_instance)}" TRANSFORMATION_TYPE="Source Definition" TYPE="SOURCE"/>']
+    
     def upstream_ids_for(cid):
-        ups = [c.get("from") for c in connections if c.get("to") == cid]
-        return [u for u in ups if u in outputs_by_id or u in inst_name_by_id]
+        return [c.get("from") for c in connections if c.get("to") == cid and c.get("from") in outputs_by_id]
 
-    prev_id = "__source__"
-    tx_ids = [c for c in ordered_ids if c not in (sid, tid)]
-
-    for cid in tx_ids:
+    for cid in ordered_ids:
         comp = component_map[cid]
         cname = (comp.get("name") or cid).replace(" ", "_")
         pct = _pc_type(comp.get("type"))
@@ -190,8 +182,8 @@ def generate_powercenter_xml(etl, database_type="Oracle", repository_name="ETL_R
         decl = {_field_name(f): f for f in comp.get("fields", []) if isinstance(f, dict) and _field_name(f)}
         
         inc_names, seen, inc_types = [], set(), {}
-        for up in upstream_ids_for(cid) or [prev_id]:
-            for n in out_by_id.get(up, {}).keys() if 'out_by_id' in locals() else outputs_by_id.get(up, {}).keys():
+        for up in upstream_ids_for(cid):
+            for n in outputs_by_id.get(up, {}).keys():
                 if n not in seen:
                     seen.add(n)
                     inc_names.append(n)
@@ -228,8 +220,9 @@ def generate_powercenter_xml(etl, database_type="Oracle", repository_name="ETL_R
 
         attr_rows = []
         cond = comp.get("condition")
-        if cond and comp.get("type", "").upper() in CONDITION_ATTRIBUTE_NAME:
-            attr_rows.append(f'          <TABLEATTRIBUTE NAME="{CONDITION_ATTRIBUTE_NAME[comp.get("type").upper()]}" VALUE="{_esc(cond)}"/>')
+        c_type = comp.get("type", "").upper()
+        if cond and c_type in CONDITION_ATTRIBUTE_NAME:
+            attr_rows.append(f'          <TABLEATTRIBUTE NAME="{CONDITION_ATTRIBUTE_NAME[c_type]}" VALUE="{_esc(cond)}"/>')
 
         tx_desc = comp.get("description", "")
         tx_blocks.append(
@@ -238,47 +231,59 @@ def generate_powercenter_xml(etl, database_type="Oracle", repository_name="ETL_R
             f'\n        </TRANSFORMATION>'
         )
 
-        inst_blocks.append(f'        <INSTANCE DESCRIPTION="" NAME="{_esc(cname)}" REUSABLE="NO" TRANSFORMATION_NAME="{_esc(cname)}" TRANSFORMATION_TYPE="{_esc(pct)}" TYPE="TRANSFORMATION"/>')
-        prev_id = cid
+        # CRITICAL FIX: Ensure Source Qualifier instances strictly include the ASSOCIATED_SOURCE_INSTANCE tag
+        if pct == "Source Qualifier":
+            inst_blocks.append(
+                f'        <INSTANCE DESCRIPTION="" NAME="{_esc(cname)}" REUSABLE="NO" TRANSFORMATION_NAME="{_esc(cname)}" TRANSFORMATION_TYPE="{_esc(pct)}" TYPE="TRANSFORMATION">\n'
+                f'            <ASSOCIATED_SOURCE_INSTANCE NAME="{_esc(source_instance)}"/>\n'
+                f'        </INSTANCE>'
+            )
+        else:
+            inst_blocks.append(f'        <INSTANCE DESCRIPTION="" NAME="{_esc(cname)}" REUSABLE="NO" TRANSFORMATION_NAME="{_esc(cname)}" TRANSFORMATION_TYPE="{_esc(pct)}" TYPE="TRANSFORMATION"/>')
 
-    inst_blocks.append(f'        <INSTANCE DESCRIPTION="" NAME="{_esc(t_inst)}" TRANSFORMATION_NAME="{_esc(t_inst)}" TRANSFORMATION_TYPE="Target Definition" TYPE="TARGET"/>')
+    inst_blocks.append(f'        <INSTANCE DESCRIPTION="" NAME="{_esc(target_instance)}" TRANSFORMATION_NAME="{_esc(target_instance)}" TRANSFORMATION_TYPE="Target Definition" TYPE="TARGET"/>')
 
-    def connect(f_inst, f_type, f_flds, t_inst, t_type, t_flds):
-        t_set = set(t_flds)
-        for n in f_flds:
-            if n in t_set:
-                conn_blocks.append(f'        <CONNECTOR FROMFIELD="{_esc(n)}" FROMINSTANCE="{_esc(f_inst)}" FROMINSTANCETYPE="{_esc(f_type)}" TOFIELD="{_esc(n)}" TOINSTANCE="{_esc(t_inst)}" TOINSTANCETYPE="{_esc(t_type)}"/>')
+    conn_blocks = []
+    for conn in connections:
+        frm = conn.get("from")
+        to = conn.get("to")
+        
+        if frm in inst_name_by_id and to in inst_name_by_id:
+            f_inst = inst_name_by_id[frm]
+            f_type = inst_type_by_id[frm]
+            f_flds = list(outputs_by_id[frm].keys())
+            
+            t_inst = inst_name_by_id[to]
+            t_type = inst_type_by_id[to]
+            t_flds = inputs_by_id[to]
+            
+            t_set = set(t_flds)
+            for n in f_flds:
+                if n in t_set:
+                    conn_blocks.append(f'        <CONNECTOR FROMFIELD="{_esc(n)}" FROMINSTANCE="{_esc(f_inst)}" FROMINSTANCETYPE="{_esc(f_type)}" TOFIELD="{_esc(n)}" TOINSTANCE="{_esc(t_inst)}" TOINSTANCETYPE="{_esc(t_type)}"/>')
 
-    if tx_ids:
-        for cid in tx_ids:
-            ups = upstream_ids_for(cid) or (["__source__"] if cid == tx_ids[0] else [tx_ids[tx_ids.index(cid) - 1]])
-            for up in ups:
-                f_i = s_inst if up == "__source__" else inst_name_by_id[up]
-                f_t = "Source Definition" if up == "__source__" else inst_type_by_id[up]
-                f_f = s_order if up == "__source__" else list(outputs_by_id[up].keys())
-                connect(f_i, f_t, f_f, inst_name_by_id[cid], inst_type_by_id[cid], inputs_by_id[cid])
-                
-        last_id = tx_ids[-1]
-        connect(inst_name_by_id[last_id], inst_type_by_id[last_id], list(outputs_by_id[last_id].keys()), t_inst, "Target Definition", [n for f in t_fields if (n := _field_name(f))])
-    else:
-        connect(s_inst, "Source Definition", s_order, t_inst, "Target Definition", [n for f in t_fields if (n := _field_name(f))])
-
-    mapping_body = "\n\n".join(tx_blocks) + ("\n\n" if tx_blocks else "\n") + "\n".join(inst_blocks) + "\n\n" + "\n".join(conn_blocks)
+    mapping_body = "\n\n".join(tx_blocks)
+    if tx_blocks:
+        mapping_body += "\n\n"
+    mapping_body += "\n".join(inst_blocks)
+    mapping_body += "\n\n"
+    mapping_body += "\n".join(conn_blocks)
+    
     safe_pipe = "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in pipeline_name).upper()
     creation_date = datetime.now().strftime("%m/%d/%Y %H:%M:%S")
 
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE POWERMART SYSTEM "powrmart.dtd">
 <POWERMART CREATION_DATE="{creation_date}" REPOSITORY_VERSION="189.98">
-  <REPOSITORY NAME="{_esc(repository_name)}" VERSION="189" CODEPAGE="UTF-8" DATABASETYPE="{_esc(database_type)}">
-    <FOLDER NAME="{_esc(safe_pipe)}" GROUP="" OWNER="{_esc(folder_owner)}" SHARED="NOTSHARED" DESCRIPTION="{_esc(description)}" PERMISSIONS="rwx---r--">
+  <REPOSITORY CODEPAGE="UTF-8" DATABASETYPE="{_esc(database_type)}" NAME="{_esc(repository_name)}" VERSION="189">
+    <FOLDER DESCRIPTION="{_esc(description)}" GROUP="" NAME="{_esc(safe_pipe)}" OWNER="{_esc(folder_owner)}" PERMISSIONS="rwx---r--" SHARED="NOTSHARED">
 {src_xml}
 
 {tgt_xml}
 
       <MAPPING DESCRIPTION="{_esc(description)}" ISVALID="YES" NAME="m_{safe_pipe}" OBJECTVERSION="1" VERSIONNUMBER="1">
 {mapping_body}
-        <TARGETLOADORDER ORDER="1" TARGETINSTANCE="{_esc(t_inst)}"/>
+        <TARGETLOADORDER ORDER="1" TARGETINSTANCE="{_esc(target_instance)}"/>
       </MAPPING>
     </FOLDER>
   </REPOSITORY>
