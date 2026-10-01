@@ -12,10 +12,29 @@ from xml.sax.saxutils import quoteattr
 DATATYPE_MAP = {
     "Oracle": {"string": "varchar2", "integer": "number", "decimal": "number", "boolean": "number", "date": "date", "timestamp": "timestamp"},
     "Microsoft SQL Server": {"string": "varchar", "integer": "int", "decimal": "decimal", "boolean": "bit", "date": "date", "timestamp": "datetime2"},
+    "Teradata": {"string": "varchar", "integer": "integer", "decimal": "decimal", "boolean": "byteint", "date": "date", "timestamp": "timestamp"},
     "Generic/ANSI": {"string": "varchar", "integer": "integer", "decimal": "decimal", "boolean": "boolean", "date": "date", "timestamp": "timestamp"},
 }
 
 DEFAULT_PRECISION = {"string": (100, 0), "integer": (15, 0), "decimal": (18, 2), "boolean": (1, 0), "date": (19, 0), "timestamp": (26, 6)}
+
+# PowerCenter datatypes whose precision (and scale, where noted) is FIXED --
+# not something the source/target DDL can set. This is what "field
+# <x>'s precision is invalid" means on import: the file declared a
+# precision other than the one PowerCenter requires for that type.
+# Confirmed against Informatica's own PowerCenter Transformation
+# Datatypes reference (Integer = precision 10, not editable; same
+# pattern for Bigint/Smallint/Real/Double). Keyed by the PHYSICAL
+# datatype string (post database-mapping, lowercased), since the fix
+# applies whichever database produced the name -- Teradata's INTEGER
+# and SQL Server's INT hit the same PowerCenter-side rule.
+FIXED_PRECISION = {
+    "integer": (10, 0), "int": (10, 0),
+    "bigint": (19, 0),
+    "smallint": (5, 0), "small integer": (5, 0), "byteint": (5, 0), "tinyint": (5, 0),
+    "real": (7, 0),
+    "double": (15, 0), "float": (15, 0),
+}
 
 TRANSFORMATION_TYPE_MAP = {
     "SOURCE_QUALIFIER": "Source Qualifier", "UPDATE_STRATEGY": "Update Strategy", "SEQUENCE_GENERATOR": "Sequence Generator",
@@ -31,17 +50,42 @@ def _pc_type(comp_type): return TRANSFORMATION_TYPE_MAP.get((comp_type or "").st
 def _field_name(f): return f.get("name") if isinstance(f, dict) else f
 def _field_datatype(f): return f.get("datatype", "string") if isinstance(f, dict) else "string"
 
-def _precision_scale(f_info, def_dtype="string"):
-    if not isinstance(f_info, dict): f_info = {}
+def _physical_datatype(neutral_type, database_type):
+    neutral_type = (neutral_type or "string").strip().lower()
+    return DATATYPE_MAP.get(database_type, DATATYPE_MAP["Generic/ANSI"]).get(neutral_type, "varchar")
+
+def _resolve_precision(physical_type, f_info, def_dtype="string"):
+    """
+    Single source of truth for a field's PRECISION/SCALE, used for
+    SOURCEFIELD/TARGETFIELD alike. Fixed-width PowerCenter datatypes
+    (integer, bigint, smallint, real, double, ...) always win with
+    their required precision, regardless of what the ETL design
+    declared -- that mismatch is exactly what PowerCenter's import
+    rejects. Everything else (decimal, string/varchar, ...) keeps
+    using the declared or default precision, since those genuinely
+    are variable-width.
+    """
+    fixed = FIXED_PRECISION.get((physical_type or "").strip().lower())
+    if fixed:
+        return fixed
+
+    if not isinstance(f_info, dict):
+        f_info = {}
     dtype = (f_info.get("datatype") or def_dtype).strip().lower()
     p, s = DEFAULT_PRECISION.get(dtype, (100, 0))
     return int(f_info.get("precision", f_info.get("length", p))), int(f_info.get("scale", s))
 
 def _tx_dtype(nt, p, s):
+    """Native PowerCenter TRANSFORMATION datatype + its precision/scale
+    for a TRANSFORMFIELD port. Integer/date-time are fixed-width in
+    PowerCenter's own type system, independent of the source database."""
     nt = (nt or "string").strip().lower()
-    if nt == "integer": return "integer", 10, 0
-    if nt == "decimal": return "decimal", int(p), int(s)
-    if nt in ("date", "timestamp"): return "date/time", 29, 9
+    if nt == "integer":
+        return "integer", 10, 0
+    if nt == "decimal":
+        return "decimal", int(p), int(s)
+    if nt in ("date", "timestamp"):
+        return "date/time", 29, 9
     return "string", max(1, int(p)), 0
 
 def _get_phys_length(db, pt, log_p):
@@ -50,11 +94,9 @@ def _get_phys_length(db, pt, log_p):
     if "oracle" in db and pt in ("date", "timestamp"): return 19
     if "sql server" in db and pt == "int": return 4
     if "sql server" in db and pt == "decimal": return 17
+    if "teradata" in db and pt == "integer": return 4
+    if "teradata" in db and pt == "byteint": return 1
     return log_p
-
-def _physical_datatype(neutral_type, database_type):
-    neutral_type = (neutral_type or "string").strip().lower()
-    return DATATYPE_MAP.get(database_type, DATATYPE_MAP["Generic/ANSI"]).get(neutral_type, "varchar")
 
 def compute_component_order(components, connections):
     cmap = {c["id"]: c for c in components if c.get("id")}
@@ -115,8 +157,8 @@ def generate_powercenter_xml(etl, database_type="Oracle", repository_name="ETL_R
             if not name: continue
             dtype = _field_datatype(f)
             is_key = bool(f.get("key")) if isinstance(f, dict) else False
-            p, s = _precision_scale(f, dtype)
             pt = _physical_datatype(dtype, database_type)
+            p, s = _resolve_precision(pt, f, dtype)
             pl = _get_phys_length(database_type, pt, p)
             ka = ' KEYTYPE="PRIMARY KEY"' if is_key else ' KEYTYPE="NOT A KEY"'
             na = ' NULLABLE="NOTNULL"' if is_key else ' NULLABLE="NULL"'
@@ -132,7 +174,7 @@ def generate_powercenter_xml(etl, database_type="Oracle", repository_name="ETL_R
     tgt_desc = target.get("description", "")
 
     src_xml = (
-        f'      <SOURCE BUSINESSNAME="" DATABASETYPE="{_esc(database_type)}" DBDNAME="default" '
+        f'      <SOURCE BUSINESSNAME="" DATABASETYPE="{_esc(database_type)}" '
         f'DESCRIPTION="{_esc(src_desc)}" NAME="{_esc(source_instance)}" OBJECTVERSION="1" '
         f'OWNERNAME="{_esc(src_owner)}" VERSIONNUMBER="1">\n'
         f'{def_fields_xml("SOURCEFIELD", s_fields)}\n'
@@ -157,16 +199,25 @@ def generate_powercenter_xml(etl, database_type="Oracle", repository_name="ETL_R
     outputs_by_id[source["id"]] = {}
     for f in s_fields:
         if name := _field_name(f):
-            outputs_by_id[source["id"]][name] = {"datatype": _field_datatype(f), "precision": _precision_scale(f)[0], "scale": _precision_scale(f)[1]}
+            pt = _physical_datatype(_field_datatype(f), database_type)
+            p, s = _resolve_precision(pt, f, _field_datatype(f))
+            outputs_by_id[source["id"]][name] = {"datatype": _field_datatype(f), "precision": p, "scale": s}
             
     inst_name_by_id[target["id"]] = target_instance
     inst_type_by_id[target["id"]] = "Target Definition"
     inputs_by_id[target["id"]] = [n for f in t_fields if (n := _field_name(f))]
 
     tx_blocks = []
-    
-    # CRITICAL FIX: DBDNAME="default" added to the Source INSTANCE
-    inst_blocks = [f'        <INSTANCE DBDNAME="default" DESCRIPTION="" NAME="{_esc(source_instance)}" TRANSFORMATION_NAME="{_esc(source_instance)}" TRANSFORMATION_TYPE="Source Definition" TYPE="SOURCE"/>']
+
+    # DBDNAME is left unset deliberately -- it's supposed to reference a
+    # real Database Definition object already registered in the target
+    # repository (the actual Teradata/Oracle connection, not a made-up
+    # name). A placeholder like "default" that doesn't exist there is
+    # exactly what produces "could not find transformation definition
+    # for <dbd> <source>" on import. Leaving it out lets PowerCenter
+    # import the source standalone; point it at a real DBD name
+    # yourself afterwards if your repository uses one.
+    inst_blocks = [f'        <INSTANCE DESCRIPTION="" NAME="{_esc(source_instance)}" TRANSFORMATION_NAME="{_esc(source_instance)}" TRANSFORMATION_TYPE="Source Definition" TYPE="SOURCE"/>']
     
     def upstream_ids_for(cid):
         return [c.get("from") for c in connections if c.get("to") == cid and c.get("from") in outputs_by_id]
@@ -204,7 +255,7 @@ def generate_powercenter_xml(etl, database_type="Oracle", repository_name="ETL_R
             expr = info.get("expression")
             dtype = info.get("datatype", inc_types.get(name, {}).get("datatype", "string"))
             
-            p, s = _precision_scale(info, dtype)
+            p, s = _resolve_precision(dtype, info, dtype)
             if not ("precision" in info or "length" in info): p = inc_types.get(name, {}).get("precision", p)
             if "scale" not in info: s = inc_types.get(name, {}).get("scale", s)
             
