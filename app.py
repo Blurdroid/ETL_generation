@@ -13,8 +13,7 @@ import glob
 
 from powercenter_agent import PowerCenterAgent
 from etl_generator import ETLGenerator
-from powercenter_xml_generator import generate_powercenter_xml
-# compute_field_flow
+from powercenter_xml_generator import generate_powercenter_xml, compute_field_flow
 
 # ============================================================
 # CONFIGURATION & LOAD AGENTS
@@ -52,13 +51,38 @@ st.markdown("""
     .subtitle { color: #777; font-size: 15px; margin-bottom: 22px; }
     footer { visibility: hidden; }
     div[data-testid="stExpander"] { border-radius: 8px; }
+
+    /* Pipeline layout */
+    .pipeline-stage-header {
+        text-align: center; padding: 0.6rem 1rem; border-radius: 8px 8px 0 0;
+        font-weight: 700; font-size: 14px; margin-bottom: 0.5rem; letter-spacing: 0.5px;
+    }
+    .pipeline-stage-header.source { background: linear-gradient(135deg, #1E88E5, #1565C0); color: white; }
+    .pipeline-stage-header.transform { background: linear-gradient(135deg, #7B1FA2, #6A1B9A); color: white; }
+    .pipeline-stage-header.target { background: linear-gradient(135deg, #43A047, #2E7D32); color: white; }
+    .pipeline-flow-bar {
+        margin: 0.5rem 0 1.5rem 0; height: 6px; border-radius: 3px;
+        background: linear-gradient(90deg, #1E88E5 0%, #7B1FA2 50%, #43A047 100%);
+        position: relative; overflow: hidden;
+    }
+    .pipeline-flow-bar::after {
+        content: ''; position: absolute; top: 0; left: -50%;
+        width: 50%; height: 100%;
+        background: linear-gradient(90deg, transparent, rgba(255,255,255,0.6), transparent);
+        animation: pipelineShine 2s linear infinite;
+    }
+    @keyframes pipelineShine { 0% { left: -50%; } 100% { left: 150%; } }
+    .kh-placeholder {
+        background: #f8f9fa; border: 2px dashed #dee2e6; border-radius: 8px;
+        padding: 1.5rem; text-align: center; color: #6c757d; margin: 1rem 0;
+    }
     </style>
 """, unsafe_allow_html=True)
 
 # ============================================================
 # DOMAIN WORKSPACE INITIALIZER
 # ============================================================
-DOMAINS = ["T24", "CARD400", "CR2", "OFSAA", "AS400"]
+DOMAINS = ["T24", "CARD400", "CR2", "Cortex", "IVR"]
 
 PC_TRANSFORMATIONS = [
     "Aggregator", "Application Source Qualifier", "Custom", "Expression",
@@ -76,11 +100,121 @@ DOMAIN_SOURCE_FIELDS = {
     "OFSAA": [("ENTITY_ID", "integer", 15), ("RISK_METRIC_CODE", "string", 20), ("METRIC_VALUE", "decimal", 18), ("REPORTING_DATE", "date", 19), ("BASEL_CATEGORY", "string", 15)],
     "AS400": [("REC_KEY", "string", 20), ("FIELD_1", "string", 30), ("FIELD_2", "decimal", 18), ("LAST_UPDATE", "date", 19)],
     "IVR": [("CALL_ID", "integer", 15), ("CUSTOMER_ID", "integer", 15), ("AGENT_ID", "integer", 15), ("CALL_DURATION_SEC", "integer", 10), ("DISPOSITION_CODE", "string", 15), ("CALL_TIMESTAMP", "timestamp", 26)],
+    "Cortex": [("ALERT_ID", "integer", 15), ("CUSTOMER_ID", "integer", 15), ("ALERT_TYPE", "string", 20), ("SEVERITY", "string", 10), ("ALERT_STATUS", "string", 15), ("CREATED_DATE", "timestamp", 26)],
 }
 
 # Maps the CIB architecture diagram's Source Systems nodes to their DOMAIN_SOURCE_FIELDS
 # entry, for the interactive Visual Architecture Builder.
-VIZ_SOURCE_MAP = {"t24": "T24", "card400": "CARD400", "cr2": "CR2", "ivr": "IVR"}
+VIZ_SOURCE_MAP = {"t24": "T24", "card400": "CARD400", "cr2": "CR2", "ivr": "IVR", "cortex": "Cortex"}
+
+# Demo schemas for each source system (used by the Architecture Picker and Knowledge Hub).
+# Each table is a list of (column_name, datatype, precision, is_primary_key).
+DEMO_SCHEMAS = {
+    "T24": {
+        "FBNK_ACCOUNT": [
+            ("ACCOUNT_ID", "integer", 15, True), ("CUSTOMER_ID", "integer", 15, False),
+            ("ACCOUNT_TITLE", "string", 50, False), ("BALANCE", "decimal", 18, False),
+            ("CURRENCY", "string", 3, False), ("ACCOUNT_STATUS", "string", 10, False),
+            ("OPEN_DATE", "date", 19, False),
+        ],
+        "FBNK_CUSTOMER": [
+            ("CUSTOMER_ID", "integer", 15, True), ("CUSTOMER_NAME", "string", 100, False),
+            ("NATIONAL_ID", "string", 20, False), ("SEGMENT", "string", 20, False),
+            ("BRANCH_CODE", "string", 10, False), ("ONBOARDING_DATE", "date", 19, False),
+        ],
+        "FBNK_TRANSACTION": [
+            ("TXN_ID", "integer", 15, True), ("ACCOUNT_ID", "integer", 15, False),
+            ("TXN_TYPE", "string", 15, False), ("TXN_AMOUNT", "decimal", 18, False),
+            ("TXN_CURRENCY", "string", 3, False), ("VALUE_DATE", "date", 19, False),
+            ("BOOKING_DATE", "date", 19, False),
+        ],
+    },
+    "CARD400": {
+        "CARD_MASTER": [
+            ("CARD_NUMBER", "string", 19, True), ("CUSTOMER_ID", "integer", 15, False),
+            ("CARD_TYPE", "string", 10, False), ("CARD_STATUS", "string", 10, False),
+            ("CREDIT_LIMIT", "decimal", 18, False), ("EXPIRY_DATE", "date", 19, False),
+        ],
+        "CARD_TRANSACTION": [
+            ("TXN_ID", "integer", 15, True), ("CARD_NUMBER", "string", 19, False),
+            ("TXN_AMOUNT", "decimal", 18, False), ("TXN_CURRENCY", "string", 3, False),
+            ("MERCHANT_CODE", "string", 15, False), ("TXN_TIMESTAMP", "timestamp", 26, False),
+        ],
+    },
+    "CR2": {
+        "ATM_TRANSACTION": [
+            ("ATM_TXN_ID", "integer", 15, True), ("ATM_ID", "string", 10, False),
+            ("CARD_NUMBER", "string", 19, False), ("TXN_TYPE", "string", 12, False),
+            ("TXN_AMOUNT", "decimal", 18, False), ("TXN_STATUS", "string", 10, False),
+            ("TXN_TIMESTAMP", "timestamp", 26, False),
+        ],
+        "ATM_DEVICE": [
+            ("ATM_ID", "string", 10, True), ("LOCATION", "string", 50, False),
+            ("BRANCH_CODE", "string", 10, False), ("DEVICE_STATUS", "string", 10, False),
+            ("LAST_SERVICE_DATE", "date", 19, False),
+        ],
+    },
+    "IVR": {
+        "CALL_LOG": [
+            ("CALL_ID", "integer", 15, True), ("CUSTOMER_ID", "integer", 15, False),
+            ("AGENT_ID", "integer", 15, False), ("CALL_TYPE", "string", 20, False),
+            ("CALL_DURATION_SEC", "integer", 10, False), ("DISPOSITION_CODE", "string", 15, False),
+            ("CALL_TIMESTAMP", "timestamp", 26, False),
+        ],
+        "AGENT": [
+            ("AGENT_ID", "integer", 15, True), ("AGENT_NAME", "string", 50, False),
+            ("TEAM", "string", 20, False), ("SKILL_GROUP", "string", 20, False),
+            ("STATUS", "string", 10, False),
+        ],
+    },
+    "Cortex": {
+        "ALERT": [
+            ("ALERT_ID", "integer", 15, True), ("CUSTOMER_ID", "integer", 15, False),
+            ("ALERT_TYPE", "string", 20, False), ("SEVERITY", "string", 10, False),
+            ("ALERT_STATUS", "string", 15, False), ("CREATED_DATE", "timestamp", 26, False),
+        ],
+        "CASE_MANAGEMENT": [
+            ("CASE_ID", "integer", 15, True), ("ALERT_ID", "integer", 15, False),
+            ("ANALYST_ID", "integer", 15, False), ("CASE_STATUS", "string", 15, False),
+            ("RISK_SCORE", "decimal", 18, False), ("CREATED_DATE", "timestamp", 26, False),
+            ("CLOSED_DATE", "timestamp", 26, False),
+        ],
+    },
+    "AS400": {
+        "GLMASTER": [
+            ("GL_ACCOUNT", "string", 20, True), ("ACCOUNT_DESC", "string", 50, False),
+            ("ACCOUNT_TYPE", "string", 10, False), ("CURRENCY_CODE", "string", 3, False),
+            ("BRANCH", "string", 10, False),
+        ],
+        "GLDETAIL": [
+            ("JOURNAL_ID", "string", 20, True), ("GL_ACCOUNT", "string", 20, False),
+            ("DEBIT_AMT", "decimal", 18, False), ("CREDIT_AMT", "decimal", 18, False),
+            ("POSTING_DATE", "date", 19, False), ("VALUE_DATE", "date", 19, False),
+        ],
+        "CUSTOMER_MASTER": [
+            ("CUST_KEY", "string", 20, True), ("CUST_NAME", "string", 50, False),
+            ("CUST_TYPE", "string", 10, False), ("NATIONAL_ID", "string", 20, False),
+            ("BRANCH", "string", 10, False), ("OPEN_DATE", "date", 19, False),
+        ],
+    },
+    "OFSAA": {
+        "FCT_RISK_METRIC": [
+            ("ENTITY_ID", "integer", 15, True), ("RISK_METRIC_CODE", "string", 20, False),
+            ("METRIC_VALUE", "decimal", 18, False), ("REPORTING_DATE", "date", 19, False),
+            ("BASEL_CATEGORY", "string", 15, False),
+        ],
+        "DIM_INSTRUMENT": [
+            ("INSTRUMENT_ID", "integer", 15, True), ("INSTRUMENT_TYPE", "string", 20, False),
+            ("MATURITY_DATE", "date", 19, False), ("NOTIONAL_AMT", "decimal", 18, False),
+            ("CURRENCY", "string", 3, False),
+        ],
+        "DIM_ENTITY": [
+            ("ENTITY_ID", "integer", 15, True), ("ENTITY_NAME", "string", 50, False),
+            ("ENTITY_TYPE", "string", 20, False), ("PARENT_ENTITY_ID", "integer", 15, False),
+            ("COUNTRY_CODE", "string", 3, False),
+        ],
+    },
+}
 
 def _target_fields_for_layer(layer, domain, source_fields):
     """
@@ -108,10 +242,22 @@ def _target_fields_for_layer(layer, domain, source_fields):
             + [f(x["name"], x["datatype"]) for x in others]
             + [f("LOAD_DTS", "timestamp")]
         )
+    if layer == "id":
+        return f"ID_{domain}_CURATED", (
+            [f(f"SK_{domain}", "integer", True), f(key["name"], key["datatype"])]
+            + [f(x["name"], x["datatype"]) for x in others]
+            + [f("EFFECTIVE_DATE", "date"), f("PUBLISH_DTS", "timestamp")]
+        )
     if layer == "imart":
         return f"FACT_{domain}", (
             [f(f"SK_{domain}", "integer", True), f(key["name"], key["datatype"])]
             + [f(x["name"], x["datatype"]) for x in others]
+        )
+    if layer == "bo":
+        return f"RPT_{domain}", (
+            [f(f"RPT_KEY", "integer", True), f(key["name"], key["datatype"])]
+            + [f(x["name"], x["datatype"]) for x in others]
+            + [f("REPORT_DATE", "date")]
         )
     return f"TGT_{domain}", list(source_fields)
 
@@ -654,89 +800,97 @@ def render_mapping_diagram(root):
 
 def render_cib_architecture_diagram(highlight_source=None, highlight_layer=None):
     """
-    Layered CIB Logical Data Architecture: Source Systems -> Staging -> Data
-    Vault (Hub/Link/Satellite). From Data Vault, Business Vault and
-    Information Mart are PARALLEL siblings (both consume directly from the
-    Data Vault — iMart does not require passing through Business Vault
-    first), and both feed Business Objects/Delivery.
+    Layered CIB Logical Data Architecture:
+    Source Systems -> Staging -> Data Vault (Hub/Link/Satellite).
+    From Data Vault: Business Vault, iMart (parallel siblings).
+    Both feed Information Delivery, then Business Objects / Reporting.
 
-    highlight_source: one of "t24"/"card400"/"cr2"/"ivr" to bold that source
-    node + its edge into Staging.
-    highlight_layer: one of "dv"/"bv"/"imart" to bold that layer's edges
-    from Data Vault, showing the active selection in the interactive builder.
+    highlight_source: one of "t24"/"card400"/"cr2"/"ivr"/"cortex"
+    highlight_layer:  one of "dv"/"bv"/"id"/"imart"/"bo"
     """
     graph = graphviz.Digraph(engine="dot")
     graph.attr(rankdir="LR", nodesep="0.3", ranksep="0.65", compound="true")
     graph.attr('node', shape='box', style='filled,rounded', fontname='Helvetica', fontsize='10')
     graph.attr('edge', color='#888888', arrowsize='0.7', penwidth='1.1')
 
-    HIGHLIGHT_COLOR = "#1E88E5"
+    HL = "#1E88E5"
 
     with graph.subgraph(name="cluster_src") as c:
         c.attr(label="Source Systems", fontsize='12', fontname='Helvetica-Bold', style='rounded', color='#90A4AE', bgcolor='#FAFAFA')
         for nid, label in [("t24", "T24\n(Core Banking)"), ("card400", "CARD400\n(Card Systems)"),
-                            ("cr2", "CR2\n(ATM Switches)"), ("ivr", "IVR\n(Call Center)")]:
+                            ("cr2", "CR2\n(ATM Switches)"), ("ivr", "IVR\n(Call Center)"),
+                            ("cortex", "Cortex\n(AML/Fraud)")]:
             is_hl = nid == highlight_source
-            c.node(nid, label=label, fillcolor="#1E88E5" if is_hl else "#E3F2FD",
+            c.node(nid, label=label, fillcolor=HL if is_hl else "#E3F2FD",
                    fontcolor="white" if is_hl else "black", penwidth="2.5" if is_hl else "1")
 
     graph.node("stg", label="Staging (STG)\n1:1 raw tables\nNo business logic", fillcolor="#FFF3E0")
 
     with graph.subgraph(name="cluster_dv") as c:
         c.attr(label="Data Vault (DV)", fontsize='12', fontname='Helvetica-Bold', style='rounded', color='#90A4AE', bgcolor='#FAFAFA')
-        dv_fill = "#1E88E5" if highlight_layer == "dv" else "#E8F5E9"
+        dv_fill = HL if highlight_layer == "dv" else "#E8F5E9"
         dv_font = "white" if highlight_layer == "dv" else "black"
         for nid, label in [("hub", "Hub"), ("link", "Link"), ("sat", "Satellite")]:
             c.node(nid, label=label, fillcolor=dv_fill, fontcolor=dv_font, penwidth="2.5" if highlight_layer == "dv" else "1")
 
-    # Business Vault and Information Mart are drawn as PARALLEL siblings: both
-    # are placed on the same rank so they sit side-by-side (not one after the
-    # other), and both connect directly back to the Data Vault cluster.
-    bv_fill = "#1E88E5" if highlight_layer == "bv" else "#F3E5F5"
+    bv_fill = HL if highlight_layer == "bv" else "#F3E5F5"
     graph.node("bv", label="Business Vault (BV)\nComputations\nSoft business rules",
                 fillcolor=bv_fill, fontcolor="white" if highlight_layer == "bv" else "black",
                 penwidth="2.5" if highlight_layer == "bv" else "1")
 
     with graph.subgraph(name="cluster_imart") as c:
         c.attr(label="Information Mart (iMART)", fontsize='12', fontname='Helvetica-Bold', style='rounded', color='#90A4AE', bgcolor='#FAFAFA')
-        im_fill = "#1E88E5" if highlight_layer == "imart" else "#FCE4EC"
+        im_fill = HL if highlight_layer == "imart" else "#FCE4EC"
         im_font = "white" if highlight_layer == "imart" else "black"
         for nid, label in [("fact", "Fact"), ("dim", "Dimension")]:
             c.node(nid, label=label, fillcolor=im_fill, fontcolor=im_font, penwidth="2.5" if highlight_layer == "imart" else "1")
 
-    # BV and the iMart cluster naturally land on the same rank (dot's default
-    # longest-path layering) since both are exactly one hop from the Data
-    # Vault cluster and one hop to Business Objects — i.e. parallel siblings.
+    id_fill = HL if highlight_layer == "id" else "#E1F5FE"
+    graph.node("info_delivery", label="Information Delivery (ID)\nCurated datasets\nPublished views",
+                fillcolor=id_fill, fontcolor="white" if highlight_layer == "id" else "black",
+                penwidth="2.5" if highlight_layer == "id" else "1")
 
     with graph.subgraph(name="cluster_bo") as c:
-        c.attr(label="Business Objects / Delivery", fontsize='12', fontname='Helvetica-Bold', style='rounded', color='#90A4AE', bgcolor='#FAFAFA')
-        for nid, label in [("tableau", "Tableau"), ("ofsaa", "OFSAA\n(Risk/Finance)")]:
-            c.node(nid, label=label, fillcolor="#ECEFF1")
+        c.attr(label="Business Objects / Reporting (BO)", fontsize='12', fontname='Helvetica-Bold', style='rounded', color='#90A4AE', bgcolor='#FAFAFA')
+        bo_fill = HL if highlight_layer == "bo" else "#ECEFF1"
+        bo_font = "white" if highlight_layer == "bo" else "black"
+        for nid, label in [("tableau", "Tableau"), ("ofsaa_rpt", "OFSAA\n(Risk/Finance)")]:
+            c.node(nid, label=label, fillcolor=bo_fill, fontcolor=bo_font, penwidth="2.5" if highlight_layer == "bo" else "1")
 
-    # Source Systems -> Staging (single edge from cluster boundary)
-    src_edge_color = HIGHLIGHT_COLOR if highlight_source else "#888888"
+    # Source Systems -> Staging
+    src_edge_color = HL if highlight_source else "#888888"
     src_tail = highlight_source or "t24"
     graph.edge(src_tail, "stg", ltail="cluster_src", color=src_edge_color, penwidth="2.2" if highlight_source else "1.1")
 
     # Staging -> Data Vault
     graph.edge("stg", "hub", lhead="cluster_dv",
-               color=HIGHLIGHT_COLOR if highlight_layer == "dv" else "#888888",
+               color=HL if highlight_layer == "dv" else "#888888",
                penwidth="2.2" if highlight_layer == "dv" else "1.1")
 
     # Data Vault -> Business Vault (parallel branch 1)
     graph.edge("hub", "bv", ltail="cluster_dv",
-               color=HIGHLIGHT_COLOR if highlight_layer == "bv" else "#888888",
+               color=HL if highlight_layer == "bv" else "#888888",
                penwidth="2.2" if highlight_layer == "bv" else "1.1")
 
-    # Data Vault -> Information Mart (parallel branch 2 — does NOT require Business Vault)
+    # Data Vault -> Information Mart (parallel branch 2)
     graph.edge("hub", "fact", ltail="cluster_dv", lhead="cluster_imart",
-               color=HIGHLIGHT_COLOR if highlight_layer == "imart" else "#888888",
+               color=HL if highlight_layer == "imart" else "#888888",
                penwidth="2.2" if highlight_layer == "imart" else "1.1")
 
-    # Business Vault -> Business Objects
-    graph.edge("bv", "tableau", lhead="cluster_bo")
-    # Information Mart -> Business Objects
-    graph.edge("fact", "tableau", ltail="cluster_imart", lhead="cluster_bo")
+    # Business Vault -> Information Delivery
+    graph.edge("bv", "info_delivery",
+               color=HL if highlight_layer in ("bv", "id") else "#888888",
+               penwidth="2.2" if highlight_layer in ("bv", "id") else "1.1")
+
+    # Information Mart -> Information Delivery
+    graph.edge("fact", "info_delivery", ltail="cluster_imart",
+               color=HL if highlight_layer in ("imart", "id") else "#888888",
+               penwidth="2.2" if highlight_layer in ("imart", "id") else "1.1")
+
+    # Information Delivery -> Business Objects
+    graph.edge("info_delivery", "tableau", lhead="cluster_bo",
+               color=HL if highlight_layer in ("id", "bo") else "#888888",
+               penwidth="2.2" if highlight_layer in ("id", "bo") else "1.1")
 
     return graph
 
@@ -786,15 +940,16 @@ def deploy_local_pmrep(xml_string, pc_domain, pc_repo, pc_user, pc_pwd, target_f
 # ============================================================
 PAGE_EXPLAIN = "🔍 Explain a workflow"
 PAGE_BUILD = "🏗️ Build an ETL"
+PAGE_KNOWLEDGE = "📚 Knowledge Hub"
 
 with st.sidebar:
     st.markdown("### 🤖 PowerCenter Architect")
     page = st.radio(
-        "Go to", [PAGE_EXPLAIN, PAGE_BUILD],
-        index=0 if st.session_state.page == "Workflow Intelligence" else 1,
+        "Go to", [PAGE_EXPLAIN, PAGE_BUILD, PAGE_KNOWLEDGE],
+        index=0 if st.session_state.page == "Workflow Intelligence" else (1 if st.session_state.page == "ETL Generation" else 2),
         label_visibility="collapsed",
     )
-    st.session_state.page = "Workflow Intelligence" if page == PAGE_EXPLAIN else "ETL Generation"
+    st.session_state.page = "Workflow Intelligence" if page == PAGE_EXPLAIN else ("ETL Generation" if page == PAGE_BUILD else "Knowledge Hub")
 
     st.divider()
     with st.expander("⚙️ Settings", expanded=False):
@@ -978,26 +1133,49 @@ elif st.session_state.page == "ETL Generation":
     # TYPE THE COLUMNS
     # ========================================================
     if mode == MODE_FORM:
-        st.markdown("**2 · Tell me the source and target**")
-        col1, col2 = st.columns(2)
-        with col1:
-            source_name = st.text_input("Source table", placeholder=f"e.g. STG_{st.session_state.domain_sector}_ACCOUNT")
+        st.markdown("**2 · Design your data pipeline**")
+
+        # Pipeline visual header
+        st.markdown("""
+        <div style="display:flex;align-items:center;margin:0.5rem 0 0.2rem 0;">
+            <div style="flex:1;text-align:center;padding:0.4rem;font-weight:700;color:#1565C0;font-size:13px;">📥 SOURCE</div>
+            <div style="width:36px;text-align:center;font-size:18px;color:#bbb;">➜</div>
+            <div style="flex:1;text-align:center;padding:0.4rem;font-weight:700;color:#6A1B9A;font-size:13px;">⚙️ TRANSFORMATION</div>
+            <div style="width:36px;text-align:center;font-size:18px;color:#bbb;">➜</div>
+            <div style="flex:1;text-align:center;padding:0.4rem;font-weight:700;color:#2E7D32;font-size:13px;">📤 TARGET</div>
+        </div>
+        <div class="pipeline-flow-bar"></div>
+        """, unsafe_allow_html=True)
+
+        col_src, col_tx, col_tgt = st.columns(3)
+
+        with col_src:
+            st.markdown('<div class="pipeline-stage-header source">📥 SOURCE</div>', unsafe_allow_html=True)
+            source_db = st.selectbox("Source system", ["IVR", "T24", "CR2", "Cortex", "CARD400"], key="form_source_db")
+            source_name = st.text_input("Source table", placeholder=f"e.g. STG_{source_db}_ACCOUNT")
             source_fields_text = st.text_area("Source columns", placeholder="ACCOUNT_ID int\nBALANCE decimal\nSTATUS varchar", height=150,
-                                              help="One per line, or a full CREATE TABLE. The type is optional.")
-        with col2:
+                                              help="One per line, or a full CREATE TABLE.")
+
+        with col_tx:
+            st.markdown('<div class="pipeline-stage-header transform">⚙️ TRANSFORMATION</div>', unsafe_allow_html=True)
+            transformations = st.multiselect("Transformations", PC_TRANSFORMATIONS, key="form_tx")
+            architecture = st.multiselect("Architecture layer", [
+                "Staging (STG)", "Raw Data Vault (Hub/Link/Sat)", "Business Vault (BV)",
+                "Information Delivery", "Information Mart (iMART)", "Business Objects (BO)"], key="form_arch")
+            additional_requirements = st.text_area(
+                "Business rules", height=120,
+                placeholder="e.g. MD5 hash for hub key.\nFilter STATUS = 'CLOSED'.",
+                help="Leave empty for a 1:1 mapping.")
+
+        with col_tgt:
+            st.markdown('<div class="pipeline-stage-header target">📤 TARGET</div>', unsafe_allow_html=True)
+            st.selectbox("Target database", ["Teradata"], disabled=True, key="form_tgt_db")
+            target_layer_form = st.selectbox("Target layer", ["Data Vault", "Business Vault", "Information Delivery", "iMart", "BO"], key="form_tgt_layer")
             target_name = st.text_input("Target table", placeholder="e.g. HUB_ACCOUNT")
             target_fields_text = st.text_area("Target columns", placeholder="HK_ACCOUNT_ID varchar\nACCOUNT_ID int\nLOAD_DTS timestamp", height=150)
 
-        additional_requirements = st.text_area(
-            "Business rules (optional)", height=90,
-            placeholder="e.g. Calculate an MD5 hash for the hub key. Filter out STATUS = 'CLOSED'.",
-            help="Leave empty for an instant one-to-one mapping. Add rules and the AI designs the transformations.")
-        with st.expander("Advanced: architecture layer & transformations"):
-            architecture = st.multiselect("Target layer", ["Staging (STG)", "Raw Data Vault (Hub/Link/Sat)", "Business Vault (BV)", "Information Mart (iMART)"])
-            transformations = st.multiselect("Transformations", PC_TRANSFORMATIONS)
-
         if st.button("🚀 Build pipeline", type="primary", use_container_width=True):
-            domain = st.session_state.domain_sector
+            domain = source_db
             _, s_parsed = parse_ddl_or_fields(source_fields_text)
             _, t_parsed = parse_ddl_or_fields(target_fields_text)
             src_nm = source_name.strip() or f"SRC_{domain}"
@@ -1121,6 +1299,7 @@ elif st.session_state.page == "ETL Generation":
                                 response = f"Built the pipeline directly from your source/target definitions — **{src_name}** ({len(src_fields)} columns) → **{tgt_name}** ({len(tgt_fields)} columns). Ask me to add transformations, or export it below."
                             else:
                                 question_for_llm = etl_question
+                                pre_parsed_source = []
                                 if "CREATE TABLE" in etl_question.upper():
                                     question_for_llm = "Here is my DDL:\n" + clean_ddl(etl_question)
                                 else:
@@ -1142,12 +1321,90 @@ elif st.session_state.page == "ETL Generation":
                                             + field_lines
                                         )
 
-                                if st.session_state.current_etl is None:
-                                    etl = etl_generator.generate_from_requirement(question_for_llm, db_type, domain)
-                                else:
-                                    etl = etl_generator.modify_etl(question_for_llm, db_type, domain)
+                                try:
+                                    if st.session_state.current_etl is None:
+                                        etl = etl_generator.generate_from_requirement(question_for_llm, db_type, domain)
+                                    else:
+                                        etl = etl_generator.modify_etl(question_for_llm, db_type, domain)
+                                except Exception:
+                                    etl = {"needs_more_info": True}
 
-                                if etl.get("needs_more_info") or etl.get("clarifying_question"):
+                                if (etl.get("needs_more_info") or etl.get("clarifying_question")) and pre_parsed_source:
+                                    # The LLM failed or asked for more info, but we
+                                    # already have the source fields.  Build a
+                                    # deterministic pipeline so the user isn't sent
+                                    # to the DDL popup when they already gave us
+                                    # everything.
+                                    src_name = f"SRC_{domain}"
+                                    tgt_name = f"TGT_{domain}"
+                                    # Derive target fields: start with a copy of source,
+                                    # then apply simple requirement patterns we can
+                                    # detect (e.g. concatenation rules).
+                                    tgt_fields = list(pre_parsed_source)
+                                    extra_components = []
+                                    extra_connections = []
+                                    req_text = etl_question.lower()
+
+                                    # Detect "concatenate X and Y ... put in Z" patterns
+                                    concat_m = re.search(
+                                        r"concatenat\w*\s+([\w]+)\s+and\s+([\w]+)\s+.*?(?:put\s+(?:it\s+)?in|(?:into|as|to)\s+)([\w]+)",
+                                        req_text,
+                                    )
+                                    if concat_m:
+                                        col_a = concat_m.group(1).upper()
+                                        col_b = concat_m.group(2).upper()
+                                        col_out = concat_m.group(3).upper()
+                                        # Remove the individual columns from target and add the derived one
+                                        tgt_fields = [f for f in tgt_fields if f.get("name", "").upper() not in (col_a, col_b)]
+                                        tgt_fields.append({"name": col_out, "datatype": "string", "key": False, "expression": ""})
+
+                                        # Add an Expression transformation
+                                        expr_id = "exp_concat"
+                                        exp_fields = [
+                                            {"name": col_a, "datatype": "string", "expression": ""},
+                                            {"name": col_b, "datatype": "string", "expression": ""},
+                                            {"name": col_out, "datatype": "string", "expression": f"{col_a} || ' ' || {col_b}"},
+                                        ]
+                                        # Keep passthrough fields
+                                        for sf in pre_parsed_source:
+                                            sn = sf.get("name", "").upper()
+                                            if sn not in (col_a, col_b):
+                                                exp_fields.append({"name": sf["name"], "datatype": sf["datatype"], "expression": ""})
+                                        extra_components.append({
+                                            "id": expr_id,
+                                            "name": f"EXP_CONCAT_{col_out}",
+                                            "type": "EXPRESSION",
+                                            "description": f"Concatenates {col_a} and {col_b} into {col_out}",
+                                            "fields": exp_fields,
+                                            "condition": "",
+                                        })
+
+                                    pipeline_name = f"ETL_{src_name}_TO_{tgt_name}".upper()
+                                    etl = build_deterministic_etl(
+                                        pipeline_name,
+                                        etl_question.strip()[:200],
+                                        src_name, pre_parsed_source, tgt_name, tgt_fields,
+                                    )
+                                    # Inject extra transformation components
+                                    if extra_components:
+                                        sq_id = etl["components"][0]["id"] if etl["components"] else src_name
+                                        for ec in extra_components:
+                                            etl["components"].append(ec)
+                                        # Rewire: SQ -> Expression -> Target (instead of SQ -> Target)
+                                        etl["connections"] = [c for c in etl["connections"] if c.get("to") != tgt_name]
+                                        etl["connections"].append({"from": sq_id, "to": extra_components[0]["id"], "label": ""})
+                                        etl["connections"].append({"from": extra_components[-1]["id"], "to": tgt_name, "label": ""})
+
+                                    etl_generator.current_etl = etl
+                                    st.session_state.current_etl = etl
+                                    st.session_state.awaiting_ddl = False
+                                    response = (
+                                        f"Built the pipeline from your source columns — **{src_name}** "
+                                        f"({len(pre_parsed_source)} columns) → **{tgt_name}** "
+                                        f"({len(tgt_fields)} columns). "
+                                        "Review it below, or ask me to refine it."
+                                    )
+                                elif etl.get("needs_more_info") or etl.get("clarifying_question"):
                                     response = etl.get("clarifying_question") or "Please provide your DDL and Source fields."
                                     st.session_state.awaiting_ddl = True
                                 else:
@@ -1174,34 +1431,74 @@ elif st.session_state.page == "ETL Generation":
     # PICK FROM THE ARCHITECTURE
     # ========================================================
     elif mode == MODE_PICK:
-        SOURCE_BUTTONS = [("t24", "T24", "Core Banking"), ("card400", "CARD400", "Cards"), ("cr2", "CR2", "ATMs"), ("ivr", "IVR", "Call Center")]
-        LAYER_BUTTONS = [("dv", "🗄️ Data Vault", "Hub"), ("bv", "🧮 Business Vault", "Business rules"), ("imart", "📊 Info Mart", "Fact table")]
-        LAYER_LABEL = {"dv": "Data Vault", "bv": "Business Vault", "imart": "Information Mart"}
+        SOURCE_BUTTONS = [
+            ("t24", "T24", "Core Banking"), ("card400", "CARD400", "Cards"),
+            ("cr2", "CR2", "ATMs"), ("ivr", "IVR", "Call Center"),
+            ("cortex", "Cortex", "AML/Fraud"),
+        ]
+        LAYER_BUTTONS = [
+            ("dv", "🗄️ Data Vault", "Hub/Link/Sat"),
+            ("bv", "🧮 Business Vault", "Business rules"),
+            ("id", "📦 Info Delivery", "Curated data"),
+            ("imart", "📊 iMart", "Star schema"),
+            ("bo", "📈 BO", "Reporting"),
+        ]
+        LAYER_LABEL = {
+            "dv": "Data Vault", "bv": "Business Vault",
+            "id": "Information Delivery", "imart": "Information Mart",
+            "bo": "Business Objects",
+        }
 
         if "viz_source" not in st.session_state: st.session_state.viz_source = None
         if "viz_layer" not in st.session_state: st.session_state.viz_layer = None
 
         st.markdown("**2 · Where does the data come from, and where should it go?**")
-        left, right = st.columns(2)
-        with left:
-            st.caption("FROM (source system)")
-            src_cols = st.columns(len(SOURCE_BUTTONS))
-            for col, (nid, name, hint) in zip(src_cols, SOURCE_BUTTONS):
-                with col:
-                    if st.button(f"{name}\n{hint}", use_container_width=True,
-                                 type="primary" if st.session_state.viz_source == nid else "secondary", key=f"viz_src_{nid}"):
-                        st.session_state.viz_source = nid
-                        st.rerun()
-        with right:
-            st.caption("TO (target layer)")
-            layer_cols = st.columns(len(LAYER_BUTTONS))
-            for col, (nid, name, hint) in zip(layer_cols, LAYER_BUTTONS):
-                with col:
-                    if st.button(f"{name}\n{hint}", use_container_width=True, disabled=st.session_state.viz_source is None,
-                                 type="primary" if st.session_state.viz_layer == nid else "secondary", key=f"viz_layer_{nid}"):
-                        st.session_state.viz_layer = nid
-                        st.rerun()
 
+        # ---------- Source selection ----------
+        st.caption("FROM (source system)")
+        src_cols = st.columns(len(SOURCE_BUTTONS))
+        for col, (nid, name, hint) in zip(src_cols, SOURCE_BUTTONS):
+            with col:
+                if st.button(f"{name}\n{hint}", use_container_width=True,
+                             type="primary" if st.session_state.viz_source == nid else "secondary", key=f"viz_src_{nid}"):
+                    st.session_state.viz_source = nid
+                    st.rerun()
+
+        # ---------- Schema browser (after source is picked) ----------
+        viz_selected_fields = []
+        if st.session_state.viz_source:
+            domain = VIZ_SOURCE_MAP[st.session_state.viz_source]
+            schemas = DEMO_SCHEMAS.get(domain, {})
+            if schemas:
+                st.markdown("**📋 Browse & select columns from the demo schema**")
+                schema_cols = st.columns(min(len(schemas), 3))
+                for idx, (table_name, columns) in enumerate(schemas.items()):
+                    with schema_cols[idx % min(len(schemas), 3)]:
+                        with st.expander(f"📁 {table_name}", expanded=(idx == 0)):
+                            col_options = [f"{'🔑 ' if c[3] else ''}{c[0]} ({c[1]})" for c in columns]
+                            selected = st.multiselect("Columns", col_options, default=[], key=f"schema_{domain}_{table_name}", label_visibility="collapsed")
+                            for sel in selected:
+                                col_name = sel.replace("🔑 ", "").split(" (")[0]
+                                col_info = next((c for c in columns if c[0] == col_name), None)
+                                if col_info:
+                                    viz_selected_fields.append({"name": col_info[0], "datatype": col_info[1], "key": col_info[3], "expression": ""})
+                if viz_selected_fields:
+                    st.success(f"✅ {len(viz_selected_fields)} columns selected")
+
+        st.divider()
+
+        # ---------- Target layer selection ----------
+        st.caption("TO (target layer — Teradata)")
+        layer_cols = st.columns(len(LAYER_BUTTONS))
+        for col, (nid, name, hint) in zip(layer_cols, LAYER_BUTTONS):
+            with col:
+                if st.button(f"{name}\n{hint}", use_container_width=True,
+                             disabled=st.session_state.viz_source is None,
+                             type="primary" if st.session_state.viz_layer == nid else "secondary", key=f"viz_layer_{nid}"):
+                    st.session_state.viz_layer = nid
+                    st.rerun()
+
+        # ---------- Architecture diagram ----------
         st.graphviz_chart(
             render_cib_architecture_diagram(highlight_source=st.session_state.viz_source, highlight_layer=st.session_state.viz_layer),
             use_container_width=True,
@@ -1213,10 +1510,13 @@ elif st.session_state.page == "ETL Generation":
         else:
             st.caption("Pick a source, then a target layer. The highlighted path shows your choice.")
 
+        # ---------- Transformations (optional) ----------
         default_tx_by_layer = {
             "dv": ["Source Qualifier", "Expression"],
             "bv": ["Source Qualifier", "Expression", "Aggregator"],
+            "id": ["Source Qualifier", "Expression", "Aggregator"],
             "imart": ["Source Qualifier", "Joiner", "Aggregator", "Router"],
+            "bo": ["Source Qualifier", "Expression"],
         }
         viz_transformations = []
         if ready:
@@ -1229,11 +1529,18 @@ elif st.session_state.page == "ETL Generation":
             if not viz_transformations:
                 viz_transformations = default_tx_by_layer.get(st.session_state.viz_layer, [])
 
+        # ---------- Build ----------
         st.markdown("**3 · Build it**")
         if st.button("🚀 Build pipeline", type="primary", use_container_width=True, disabled=not ready, key="viz_generate_btn"):
             domain = VIZ_SOURCE_MAP[st.session_state.viz_source]
             layer = st.session_state.viz_layer
-            source_fields = [{"name": n, "datatype": d, "key": False, "expression": ""} for n, d, _p in DOMAIN_SOURCE_FIELDS.get(domain, [])]
+
+            # Use schema-selected fields if any, otherwise fall back to domain defaults
+            if viz_selected_fields:
+                source_fields = viz_selected_fields
+            else:
+                source_fields = [{"name": n, "datatype": d, "key": False, "expression": ""} for n, d, _p in DOMAIN_SOURCE_FIELDS.get(domain, [])]
+
             source_name = f"STG_{domain}_STAGING"
             target_name, target_fields = _target_fields_for_layer(layer, domain, source_fields)
 
@@ -1250,13 +1557,13 @@ elif st.session_state.page == "ETL Generation":
 
         with st.expander("What do these layers mean?"):
             st.markdown(
-                "- **Source systems** — where data starts: T24 (core banking), CARD400 (cards), CR2 (ATMs), IVR (call center).\n"
+                "- **Source systems** — where data starts: T24 (core banking), CARD400 (cards), CR2 (ATMs), IVR (call center), Cortex (AML/fraud).\n"
                 "- **Staging** — raw 1:1 copies, no business logic.\n"
                 "- **Data Vault** — the historical system of record (hubs, links, satellites).\n"
                 "- **Business Vault** — derived values and business rules. Runs *beside* the Info Mart, not before it.\n"
-                "- **Information Mart** — star schemas ready for reporting.\n"
-                "- **Business Objects** — Tableau, OFSAA and other consumers.")
-
+                "- **Information Delivery** — curated datasets published for consumers.\n"
+                "- **Information Mart (iMart)** — star schemas ready for reporting.\n"
+                "- **Business Objects (BO)** — Tableau, OFSAA and other consumers.")
     # ========================================================
     # STEP 3: REVIEW, DOWNLOAD, DEPLOY (only shown once a pipeline exists)
     # ========================================================
@@ -1324,3 +1631,147 @@ elif st.session_state.page == "ETL Generation":
                     else:
                         st.error("Deployment failed.")
                     st.code(log, language="bash")
+
+# ============================================================
+# PAGE 3: KNOWLEDGE HUB
+#   Independent reference for CIB architecture layers, source
+#   systems, business rules, and demo schema diagrams.
+# ============================================================
+elif st.session_state.page == "Knowledge Hub":
+    st.markdown('<div class="main-title">📚 Knowledge Hub</div>', unsafe_allow_html=True)
+    st.markdown('<div class="subtitle">CIB Data Architecture reference — layers, source systems, business rules & demo schemas.</div>', unsafe_allow_html=True)
+
+    kh_tabs = st.tabs([
+        "🏗️ Architecture Overview",
+        "📊 Layer Definitions",
+        "🗃️ Source Systems",
+        "📋 Business Rules & Policies",
+        "📐 Demo Schema Diagrams",
+    ])
+
+    # ---- Tab 1: Architecture Overview ------------------------------------
+    with kh_tabs[0]:
+        st.markdown("### CIB Logical Data Architecture")
+        st.graphviz_chart(render_cib_architecture_diagram(), use_container_width=True)
+        st.markdown("""
+The CIB data architecture follows a layered approach to transform raw operational data into
+business-ready information. Each layer has a specific purpose and set of rules.
+
+**Data flows from left to right:**
+1. **Source Systems** generate raw transactional data (IVR, T24, CR2, Cortex, CARD400)
+2. **Staging (STG)** ingests 1:1 copies with no transformation
+3. **Data Vault (DV)** stores the historical system of record (Hub / Link / Satellite)
+4. **Business Vault (BV)** applies soft business rules and computations
+5. **Information Delivery (ID)** curates and publishes data for consumers
+6. **Information Mart (iMart)** builds star schemas for specific analytical needs
+7. **Business Objects (BO)** serves end-user reporting tools (Tableau, OFSAA)
+""")
+        st.markdown('<div class="kh-placeholder">📝 <b>To be filled</b> — Additional architecture notes, governance policies, and data flow descriptions will be added by the Data Governance team.</div>', unsafe_allow_html=True)
+
+    # ---- Tab 2: Layer Definitions ----------------------------------------
+    with kh_tabs[1]:
+        st.markdown("### Layer Definitions")
+        st.caption("Expand each layer to see its purpose, rules, and demo schema placeholder.")
+
+        _kh_layers = [
+            ("🗂️ Staging (STG)", "The landing zone for all incoming data. Contains 1:1 raw copies of source tables with no business logic applied. Data is loaded as-is from the source systems."),
+            ("🏛️ Raw Data Vault (DV)", "The historical system of record built using Hub, Link, and Satellite patterns. Tracks all data changes over time with full auditability. No business rules — only structural integration."),
+            ("🧮 Business Vault (BV)", "Extends the Raw Data Vault with computed columns, soft business rules, and derived values. Contains business-interpreted views of the raw data."),
+            ("📦 Information Delivery (ID)", "Curated data layer that publishes business-ready datasets to downstream consumers. Applies final transformations, aggregations, and data quality rules."),
+            ("📊 Information Mart (iMart)", "Star schema / dimensional models optimized for specific analytical and reporting use cases. Contains Fact and Dimension tables."),
+            ("📈 Business Objects (BO)", "End-user reporting and visualization layer serving tools like Tableau, OFSAA, and other BI consumers."),
+        ]
+
+        for _title, _desc in _kh_layers:
+            with st.expander(_title, expanded=False):
+                st.markdown(f"**Purpose**: {_desc}")
+                st.divider()
+                st.markdown("**Business Rules & Policies**")
+                st.markdown('<div class="kh-placeholder">📝 <b>To be filled</b> — Business rules, data quality policies, and transformation logic for this layer.</div>', unsafe_allow_html=True)
+                st.divider()
+                st.markdown("**Demo Schema Diagram**")
+                st.markdown('<div class="kh-placeholder">📝 <b>To be filled</b> — ER diagram / schema model for this layer.</div>', unsafe_allow_html=True)
+                st.divider()
+                st.markdown("**Data Quality Checks**")
+                st.markdown('<div class="kh-placeholder">📝 <b>To be filled</b> — DQ rules, reconciliation procedures, and validation logic.</div>', unsafe_allow_html=True)
+
+    # ---- Tab 3: Source Systems -------------------------------------------
+    with kh_tabs[2]:
+        st.markdown("### Source System Profiles")
+        st.caption("Reference information for each operational source system feeding the data platform.")
+
+        _kh_sources = [
+            ("🏦 T24 (Core Banking)", "T24", "Temenos T24 core banking system — accounts, customers, transactions, positions."),
+            ("💳 CARD400 (Card Systems)", "CARD400", "Card management and transaction processing system for credit and debit cards."),
+            ("🏧 CR2 (ATM Switches)", "CR2", "ATM switching and channel management — ATM transactions, device monitoring."),
+            ("📞 IVR (Call Center)", "IVR", "Interactive Voice Response and call center system — call logs, agent performance."),
+            ("🔍 Cortex (AML/Fraud)", "Cortex", "Anti-money laundering and fraud detection platform — alerts, cases, risk scores."),
+        ]
+
+        for _title, _key, _desc in _kh_sources:
+            with st.expander(_title, expanded=False):
+                st.markdown(f"**Description**: {_desc}")
+                st.divider()
+                _demo = DEMO_SCHEMAS.get(_key, {})
+                if _demo:
+                    st.markdown("**Demo Schema Tables**")
+                    for _tbl, _cols in _demo.items():
+                        st.markdown(f"**`{_tbl}`**")
+                        st.table([{"Column": c[0], "Type": c[1], "Precision": c[2], "PK": "🔑" if c[3] else ""} for c in _cols])
+                st.divider()
+                st.markdown("**Integration Notes**")
+                st.markdown(f'<div class="kh-placeholder">📝 <b>To be filled</b> — Connection details, extraction frequency, data volumes, and SLAs for {_key}.</div>', unsafe_allow_html=True)
+                st.divider()
+                st.markdown("**Known Data Quality Issues**")
+                st.markdown(f'<div class="kh-placeholder">📝 <b>To be filled</b> — Known DQ issues, workarounds, and remediation plans for {_key}.</div>', unsafe_allow_html=True)
+
+    # ---- Tab 4: Business Rules & Policies --------------------------------
+    with kh_tabs[3]:
+        st.markdown("### Business Rules & Policies")
+        st.caption("Enterprise data policies and transformation rules applied across the platform.")
+
+        _kh_rules = [
+            "Data Classification & Sensitivity",
+            "Data Retention Policies",
+            "PII Masking & Encryption Rules",
+            "Regulatory Compliance (CBE, Basel III/IV)",
+            "Data Quality Standards",
+            "Cross-System Reconciliation Rules",
+            "Naming Conventions & Standards",
+            "Change Management & Versioning",
+        ]
+        for _section in _kh_rules:
+            with st.expander(f"📋 {_section}", expanded=False):
+                st.markdown(f'<div class="kh-placeholder">📝 <b>To be filled</b> — {_section} details, applicability, and enforcement procedures.</div>', unsafe_allow_html=True)
+
+    # ---- Tab 5: Demo Schema Diagrams -------------------------------------
+    with kh_tabs[4]:
+        st.markdown("### Demo Schema Diagrams")
+        st.caption("Reference schema diagrams for key systems. These are demo/template schemas to be customized.")
+
+        _stab_as400, _stab_ofsaa = st.tabs(["🖥️ AS400 Schema", "📊 OFSAA Schema"])
+
+        with _stab_as400:
+            st.markdown("#### AS400 / DB400 — General Ledger & Customer Schema")
+            for _tbl, _cols in DEMO_SCHEMAS.get("AS400", {}).items():
+                st.markdown(f"**`{_tbl}`**")
+                st.table([{"Column": c[0], "Type": c[1], "Precision": c[2], "PK": "🔑" if c[3] else ""} for c in _cols])
+            st.divider()
+            st.markdown("**ER Diagram**")
+            st.markdown('<div class="kh-placeholder">📝 <b>To be filled</b> — AS400 entity-relationship diagram showing table relationships, foreign keys, and cardinality.</div>', unsafe_allow_html=True)
+            st.divider()
+            st.markdown("**Integration Notes**")
+            st.markdown('<div class="kh-placeholder">📝 <b>To be filled</b> — AS400 extraction method (ODBC / flat file / CDC), scheduling, and known limitations.</div>', unsafe_allow_html=True)
+
+        with _stab_ofsaa:
+            st.markdown("#### OFSAA — Risk & Finance Reporting Schema")
+            for _tbl, _cols in DEMO_SCHEMAS.get("OFSAA", {}).items():
+                st.markdown(f"**`{_tbl}`**")
+                st.table([{"Column": c[0], "Type": c[1], "Precision": c[2], "PK": "🔑" if c[3] else ""} for c in _cols])
+            st.divider()
+            st.markdown("**ER Diagram**")
+            st.markdown('<div class="kh-placeholder">📝 <b>To be filled</b> — OFSAA entity-relationship diagram showing fact/dimension relationships.</div>', unsafe_allow_html=True)
+            st.divider()
+            st.markdown("**Integration Notes**")
+            st.markdown('<div class="kh-placeholder">📝 <b>To be filled</b> — OFSAA data model version, extraction procedures, and feed schedules.</div>', unsafe_allow_html=True)
+
