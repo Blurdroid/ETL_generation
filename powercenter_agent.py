@@ -9,6 +9,31 @@ import requests
 OLLAMA_URL = "http://127.0.0.1:11434/api/chat"
 MODEL = "qwen3:4b"
 
+def get_installed_ollama_models():
+    """Queries local Ollama to find what models are actually installed."""
+    try:
+        r = requests.get("http://127.0.0.1:11434/api/tags", timeout=2)
+        if r.status_code == 200:
+            return [m["name"] for m in r.json().get("models", [])]
+    except Exception:
+        pass
+    return []
+
+def resolve_model(requested_model=None):
+    """
+    Returns requested_model if installed, otherwise picks the best available
+    installed model (or falls back to default).
+    """
+    installed = get_installed_ollama_models()
+    if requested_model and requested_model in installed:
+        return requested_model
+    if installed:
+        for m in installed:
+            if "4b" in m.lower():
+                return m
+        return installed[0]
+    return requested_model or MODEL
+
 # Some Ollama builds don't fully honor "think": False for every model/route,
 # and Qwen3 can still emit its reasoning inside "content" itself (sometimes
 # missing the opening <think> tag but keeping the closing </think>). Strip
@@ -28,11 +53,16 @@ def strip_reasoning(content):
 
 
 class PowerCenterAgent:
-    def __init__(self, metadata_file="powercenter_metadata.json"):
+    def __init__(self, metadata_file="powercenter_metadata.json", model=None):
         self.metadata_file = metadata_file
         self.metadata = {"workflows": []}
         self.current_workflow = None
+        self.model = model
         self.load_metadata()
+
+    def set_model(self, model_name):
+        """Dynamically update active model name."""
+        self.model = model_name
 
     def load_metadata(self):
         """Loads workflow metadata from the local JSON file if it exists."""
@@ -60,7 +90,7 @@ class PowerCenterAgent:
                 return wf
         return None
 
-    def chat(self, prompt, retries=2):
+    def chat(self, prompt, retries=2, model=None):
         """
         Sends the user's prompt along with the current workflow context
         to the local Ollama LLM to generate an explanation.
@@ -92,14 +122,12 @@ class PowerCenterAgent:
             {"role": "user", "content": context + prompt},
         ]
 
+        active_model = resolve_model(model or self.model)
+
         payload = {
-            "model": MODEL,
+            "model": active_model,
             "messages": messages,
             "stream": False,
-            # Disabling thinking is the fix: without it, Qwen3 can spend
-            # its whole num_predict budget on internal reasoning tokens
-            # and never emit any actual "content" -- that's exactly what
-            # "Qwen returned no response content" was.
             "think": False,
             "options": {
                 "temperature": 0.2,  # low temperature for factual analysis
@@ -113,10 +141,17 @@ class PowerCenterAgent:
         for attempt in range(retries):
             try:
                 response = requests.post(OLLAMA_URL, json=payload, timeout=(10, 300))
+                if response.status_code == 404:
+                    installed = get_installed_ollama_models()
+                    if installed and payload["model"] not in installed:
+                        active_model = installed[0]
+                        self.model = active_model
+                        payload["model"] = active_model
+                        response = requests.post(OLLAMA_URL, json=payload, timeout=(10, 300))
                 response.raise_for_status()
                 data = response.json()
             except requests.RequestException as e:
-                last_error = f"Could not reach Ollama at {OLLAMA_URL}: {e}"
+                last_error = f"Could not reach Ollama at {OLLAMA_URL} with model '{payload.get('model')}': {e}"
                 continue
 
             message = data.get("message", {})

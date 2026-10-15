@@ -1,0 +1,29 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+
+# Office temporary lock files
+~$*.docx
+~$*.xlsx
+~$*.pptx
+
+# Logs & temp files
+*.log
+*.tmp
+
+# Lineage and data exports (avoid GitHub 100MB file limit)
+*.csv
+column_lineage.csv
+table_lineage.csv
+unresolved.csv
+
+# Local testing scratch directory
+scratch/
